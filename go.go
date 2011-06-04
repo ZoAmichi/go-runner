@@ -43,78 +43,6 @@ func init() {
 	}
 }
 
-func escapeScriptHeader( filename string ) ( temp string, err os.Error ) {
-
-	temp = filename
-	f, err := os.Open( filename )
-	if err != nil { return }
-	defer f.Close()
-
-	r := bufio.NewReader(f)
-
-	var c byte
-
-	if c,err = r.ReadByte(); err == os.EOF {
-		return
-	} else if err != nil {
-		return
-	}
-
-	if err = r.UnreadByte(); err != nil { return }
-
-	// normal source.
-	if c != '#' { return }
-
-	// skip script header.
-	col := 0
-	for {
-	
-		if c,err = r.ReadByte(); err == os.EOF {
-			break
-		} else if err != nil {
-			return
-		}
-		
-		if c == 0x0A { // LF
-			// Unsupport CR(0x0D) EOL
-			col = 0
-			continue
-		} else if c == 0x09 || c == 0x20 {
-			// skip HT or SPACE
-			continue
-		}
-
-		if col == 0 && c != '#' {
-			if err = r.UnreadByte(); err != nil {
-				return
-			}
-			break
-		}
-		col++
-	}
-
-	// write go source to temporary file.
-	temp = filename+".tmp"
-	tempFile, err := os.OpenFile( temp, os.O_WRONLY|os.O_CREATE, 0644 )
-	if err != nil { return }
-	defer tempFile.Close()
-
-	w := bufio.NewWriter( tempFile )
-	for {
-		if c,err = r.ReadByte(); err == os.EOF {
-			break
-		} else if err != nil {
-			return
-		}
-		if err = w.WriteByte(c); err != nil {
-			return
-		}
-	}
-	w.Flush()
-
-	err = nil
-	return
-}
 
 // source
 type source struct {
@@ -336,10 +264,100 @@ func newContext() *context {
 	return c
 }
 
-func (self *context) ignoreSource( filepath string ) {
-	// TODO clean path
-	filepath = path.Clean( filepath )
-	self.ignoreFiles[ filepath ] = filepath
+func (self *context) getRunnableSource( filename string ) ( *source, os.Error ) {
+
+	temp := filename
+	f, err := os.Open( filename )
+	if err != nil { return nil, err }
+	defer f.Close()
+
+	r := bufio.NewReader(f)
+
+	var c byte
+
+	if c,err = r.ReadByte(); err == os.EOF {
+
+		return self.getSource( filename )
+
+	} else if err != nil {
+		return nil, err
+	}
+
+	if err = r.UnreadByte(); err != nil { return nil,err }
+
+	// normal source.
+	if c != '#' {
+		return self.getSource( filename )
+	}
+
+	// skip script header.
+	col := 0
+	for {
+	
+		if c,err = r.ReadByte(); err == os.EOF {
+			break
+		} else if err != nil {
+			return nil, err
+		}
+		
+		if c == 0x0A { // LF
+			// Unsupport CR(0x0D) EOL
+			col = 0
+			continue
+		} else if c == 0x09 || c == 0x20 {
+			// skip HT or SPACE
+			continue
+		}
+
+		if col == 0 && c != '#' {
+			if err = r.UnreadByte(); err != nil {
+				return nil, err
+			}
+			break
+		}
+		col++
+	}
+
+	// write go source to temporary file.
+	temp = filename+".tmp"
+	err = func() os.Error {
+		tempFile, e := os.OpenFile( temp, os.O_WRONLY|os.O_CREATE, 0644 )
+		if e != nil { return e }
+		defer tempFile.Close()
+
+		w := bufio.NewWriter( tempFile )
+		for {
+			if c,e = r.ReadByte(); e == os.EOF {
+				break
+			} else if e != nil {
+				return e
+			}
+			if e = w.WriteByte(c); e != nil {
+				return e
+			}
+		}
+		w.Flush()
+		return nil
+	}()
+	if err != nil {
+		return nil, err
+	}
+
+	self.ignoreFiles[ filename ] = filename
+
+	src,err := self.getSource( temp )
+	if err != nil {
+		return nil, err
+	}
+
+	// Overwrite original Mtime_ns
+	if stat, err := os.Lstat( filename ); err != nil {
+		return nil, err
+	} else {
+		src.mtime_ns = stat.Mtime_ns
+	}
+
+	return src, nil
 }
 
 func (self *context) getSource( filepath string ) ( *source, os.Error ){
@@ -399,16 +417,15 @@ func (*context) listDir( dirname string ) []string {
 }
 
 func (*context) exec(args []string, dir string) {
-	for i:=0; i<len(args); i++ {
-		fmt.Printf("arg: %s\n", args[i])
-	}
+
+	fmt.Println( strings.Join(args, " ") )
+
 	p, error := os.StartProcess(args[0], args,
 		&os.ProcAttr{dir, os.Environ(), []*os.File{os.Stdin, os.Stdout, os.Stderr}})
 	if error != nil {
 		fmt.Fprintf( os.Stderr, "Can't %s\n", error );
 		os.Exit(1);
 	}
-	fmt.Println("test")
 	m, error := p.Wait(0)
 	if error != nil {
 		fmt.Fprintf( os.Stderr, "Can't %s\n", error );
@@ -427,15 +444,7 @@ func main() {
 	}
 	
 	ctx := newContext()
-	filepath, err := escapeScriptHeader( args[0] )
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Can't %v\n", err)
-		os.Exit(1)
-	}
-	if filepath != args[0] {
-		ctx.ignoreSource( args[0] )
-	}
-	src,error := ctx.getSource( filepath )
+	src, error := ctx.getRunnableSource( args[0] )
 	if error != nil {
 		fmt.Fprintf(os.Stderr, "Can't %v\n", error)
 		os.Exit(1)
@@ -445,7 +454,7 @@ func main() {
 		targetName = targetName[0 : len(targetName)-3]
 	}
 
-	t := newTarget( ctx, targetName, "main" )
+	t := newTarget( ctx, targetName, src.packageName )
 	t.files[src.filepath] = src
 	t.ensureSources = true
 	if error = t.reflesh(); error != nil {
@@ -457,13 +466,15 @@ func main() {
 	t.build()
 
 	// remove tmp file
-	if filepath != args[0] {
-		if err = os.Remove( filepath ); err != nil {
-			fmt.Fprintf(os.Stderr, "Can't %v\n", err)
+	if src.filepath != args[0] {
+		if error = os.Remove( src.filepath ); error != nil {
+			// warn
+			fmt.Fprintf(os.Stderr, "Can't %v\n", error)
 		}
 	}
 
-	//os.Exec(path.Join(curdir, target), args, os.Environ())
-	//fmt.Fprintf(os.Stderr, "Error running %v\n", args)
-	//os.Exit(1)
+	targetCmd := make([]string, 1)
+	targetCmd[0] = "./"+targetName
+	targetCmd = append( targetCmd, args[1:]... )
+	ctx.exec( targetCmd, ".")
 }
