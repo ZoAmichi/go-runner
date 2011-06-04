@@ -2,11 +2,9 @@
 # Use of this source code is governed by a BSD-style
 # license that can be found in the LICENSE file.
 
-all: install
-
-include $(GOROOT)/src/Make.$(GOARCH)
+include $(GOROOT)/src/Make.inc
 
 TARG    = go
-GOFILES = $(TARG).go
+GOFILES = go.go
 
 include $(GOROOT)/src/Make.cmd
