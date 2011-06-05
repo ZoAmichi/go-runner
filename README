@@ -1,3 +1,1 @@
 go is a simple runner for .go programs.
-
-It has limited functionality: for example it won't work with locally included packages that are named differently than their corresponding source files. This implies that it's one local package per source file.

@@ -1,4 +1,5 @@
 // Copyright 2009 Dimiter Stanev, malkia@gmail.com. All rights reserved.
+// Copyright 2011 Kai Suzuki, kai.zoamichi@gmail.com. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -361,7 +362,7 @@ func (self *context) getRunnableSource(filename string) (*source, os.Error) {
 	// write go source to temporary file.
 	temp = filename + ".tmp"
 	for i:=1 ;self.fileExists(temp); i++ {
-		temp = fmt.Sprintf("%s.tmp%d", filename, i)
+		temp = fmt.Sprintf("%s.%d", filename, i)
 	}
 	err = func() os.Error {
 		tempFile, e := os.OpenFile(temp, os.O_WRONLY|os.O_CREATE, 0644)
@@ -465,9 +466,9 @@ func (*context) listDir(dirname string) []string {
 
 func (*context) exec(args []string, dir string) os.Error {
 
-	fmt.Println(strings.Join(args, " "))
+	//fmt.Println(strings.Join(args, " "))
 	p, error := os.StartProcess(args[0], args,
-		&os.ProcAttr{dir, os.Environ(), []*os.File{os.Stdin, os.Stdout, os.Stderr}})
+		&os.ProcAttr{dir, os.Environ(), []*os.File{nil, os.Stdout, os.Stderr}})
 
 	if error != nil {
 		return error
@@ -476,7 +477,7 @@ func (*context) exec(args []string, dir string) os.Error {
 	if m, error := p.Wait(0); error != nil {
 		return error
 	} else if m.WaitStatus != 0 {
-		return os.ErrorString(fmt.Sprintf("Status=%d", int(m.WaitStatus)))
+		return os.ErrorString(fmt.Sprintf("%s Exit(%d)", args[0], int(m.WaitStatus)))
 	}
 
 	return nil
@@ -531,5 +532,21 @@ func main() {
 		cmd[0] = "./"+targetName
 	}
 	cmd = append(cmd, args[1:]...)
-	ctx.exec(cmd, ".")
+
+	//fmt.Println(strings.Join(args, " "))
+	p, error := os.StartProcess(cmd[0], cmd,
+		&os.ProcAttr{".", os.Environ(), []*os.File{os.Stdin, os.Stdout, os.Stderr}})
+
+	if error != nil {
+		fmt.Fprintf(os.Stderr, "Can't %s\n", error)
+		os.Exit(1)
+	}
+
+	if m, error := p.Wait(0); error != nil {
+		fmt.Fprintf(os.Stderr, "Can't %s\n", error)
+		os.Exit(1)
+	} else if m.WaitStatus != 0 {
+		os.Exit(int(m.WaitStatus))
+	}
+
 }
