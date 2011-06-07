@@ -24,6 +24,7 @@ var (
 	gobin     = os.Getenv("GOBIN")
 	gopkg     = ""
 	arch      = ""
+	usage     = "go [-dcrCRNuEvV] [go-file] [args]"
 )
 
 func init() {
@@ -164,6 +165,24 @@ func (self *target) reflesh() os.Error {
 
 	self.objectDir = dir
 	obj := path.Join(self.objectDir, self.targetName+"."+arch)
+
+	// clean
+	if self.ctx.flag.cleanOnly || self.ctx.flag.rebuild {
+		targets := make([]string, 2)
+		targets[0] = obj
+		if self.importName == "main" {
+			targets[1] = path.Join(self.objectDir, self.targetName)
+		} else {
+			targets[1] = path.Join(self.objectDir, self.targetName+".a")
+		}
+		for _, t := range targets {
+			if err := os.Remove(t); err != nil {
+				// warn
+				fmt.Fprintf(os.Stderr, "Can't %v\n", err)
+			}
+		}
+	}
+
 	self.shouldUpdate = false
 	if !self.ctx.fileExists(obj) {
 		self.shouldUpdate = true
@@ -224,12 +243,20 @@ func (self *target) build() ( bool, os.Error ) {
 		// TODO error
 		return false, nil
 	}
+
+	flag := self.ctx.flag
+
 	// Compile
 	i := 0
-	argv := make([]string, 3)
+	argv := make([]string, 1)
 	argv[0] = path.Join(gobin, arch+"g")
-	argv[1] = "-o"
-	argv[2] = path.Join(self.objectDir, self.targetName+"."+arch)
+	if flag.disableOptimiz || flag.debug {
+		argv = append( argv, "-N")
+	}
+	if flag.disallowUnsafe {
+		argv = append( argv, "-u")
+	}
+	argv = append( argv, []string{ "-o", path.Join(self.objectDir, self.targetName+"."+arch) }... )
 	includeArgs := make([]string, len(self.packagePaths)*2)
 	linkArgs := make([]string, len(includeArgs))
 	if len(includeArgs) > 0 {
@@ -255,21 +282,26 @@ func (self *target) build() ( bool, os.Error ) {
 	}
 
 	// Link/Pack
+	cmdLink := make([]string, 1)
+	cmdLink[0] = path.Join(gobin, arch+"l")
+	if flag.extraSymbol || flag.debug {
+		cmdLink = append( cmdLink, "-e")
+	}
+	cmdLink = append( cmdLink, "-o")
 	if self.importName == "main" {
-		argv = make([]string, 3)
-		argv[0] = path.Join(gobin, arch+"l")
-		argv[1] = "-o"
-		argv[2] = path.Join(self.objectDir, self.targetName)
+		argv = cmdLink
+		argv = append( argv, path.Join(self.objectDir, self.targetName) )
 		if len(linkArgs) > 0 {
 			argv = append(argv, linkArgs...)
 		}
 		argv = append(argv, path.Join(self.objectDir, self.targetName+"."+arch))
 	} else {
-		argv = make([]string, 4)
-		argv[0] = path.Join(gobin, "gopack")
-		argv[1] = "grc"
-		argv[2] = path.Join(self.objectDir, self.targetName+".a")
-		argv[3] = path.Join(self.objectDir, self.targetName+"."+arch)
+		argv = []string {
+			path.Join(gobin, "gopack"),
+			"grc",
+			path.Join(self.objectDir, self.targetName+".a"),
+			path.Join(self.objectDir, self.targetName+"."+arch),
+		}
 	}
 
 	if err := self.ctx.exec(argv, "."); err != nil {
@@ -281,17 +313,75 @@ func (self *target) build() ( bool, os.Error ) {
 	return true, nil
 }
 
+// flag
+type flag struct {
+	debug bool
+	encache bool
+	cleanOnly bool
+	rebuild bool
+	norun bool
+	disableOptimiz bool
+	disallowUnsafe bool
+	extraSymbol bool
+	verbose bool
+	version bool
+}
+
 // context
 type context struct {
+	flag        *flag
+	nArg        int
+	gofile      string
 	files       map[string]*source
 	ignoreFiles map[string]string
 }
 
-func newContext() *context {
+func newContext() (*context, os.Error) {
 	c := new(context)
+	c.flag = new(flag)
 	c.files = make(map[string]*source)
 	c.ignoreFiles = make(map[string]string)
-	return c
+	c.gofile = ""
+	c.nArg = 1
+
+	flagMap := map[int]*bool {
+		'd':&c.flag.debug,
+		'c':&c.flag.encache,
+		'r':&c.flag.rebuild,
+		'C':&c.flag.cleanOnly,
+		'R':&c.flag.norun,
+		'N':&c.flag.disableOptimiz,
+		'u':&c.flag.disallowUnsafe,
+		'E':&c.flag.extraSymbol,
+		'v':&c.flag.verbose,
+		'V':&c.flag.version,
+	}
+
+	// Parse Arguments.
+	for _, arg := range os.Args[1:] {
+
+		c.nArg++
+		if len(arg) < 2 { continue }
+		if arg[0] == '-' {
+
+			// flags
+			for _, c := range arg[1:] {
+				if ref, exist := flagMap[c]; exist {
+					*ref = true
+				} else {
+					return nil, os.ErrorString(fmt.Sprintf("Unknown option: -%c", c))
+				}
+			}
+
+		} else {
+			// source
+			c.gofile = arg
+			break
+		}
+
+	}
+
+	return c, nil
 }
 
 func (self *context) getRunnableSource(filename string) (*source, os.Error) {
@@ -466,7 +556,7 @@ func (*context) listDir(dirname string) []string {
 
 func (*context) exec(args []string, dir string) os.Error {
 
-	//fmt.Println(strings.Join(args, " "))
+	fmt.Println(strings.Join(args, " "))
 	p, error := os.StartProcess(args[0], args,
 		&os.ProcAttr{dir, os.Environ(), []*os.File{nil, os.Stdout, os.Stderr}})
 
@@ -484,26 +574,32 @@ func (*context) exec(args []string, dir string) os.Error {
 }
 
 func main() {
-	args := os.Args[1:]
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "go main-program [arg0 [arg1 ...]]")
+
+	ctx, err := newContext()
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		fmt.Println(usage)
 		os.Exit(1)
 	}
 
-	ctx := newContext()
+	if ctx.gofile == "" {
+		fmt.Println(usage)
+		os.Exit(1)
+	}
 
-	targetName := args[0]
+	targetName := ctx.gofile
 	if path.Ext(targetName) == ".go" {
 		targetName = targetName[0 : len(targetName)-3]
 	}
 
 	// Build
 	build := func() ( bool, os.Error ) {
-		src, err := ctx.getRunnableSource(args[0])
+		src, err := ctx.getRunnableSource(ctx.gofile)
 		if err != nil { return false, err }
 
 		// remove tmp file
-		if src.filepath != args[0] {
+		if src.filepath != ctx.gofile {
 			defer func(){
 				if err = os.Remove(src.filepath); err != nil {
 					// warn
@@ -517,12 +613,20 @@ func main() {
 		t.ensureSources = true
 		if err = t.reflesh(); err != nil { return false, err }
 
-		return t.build()
+		if !ctx.flag.cleanOnly {
+			return t.build()
+		}
+
+		return false, nil
 	}
 	
 	if _, err := build(); err != nil {
 		fmt.Fprintf(os.Stderr, "Can't %s\n", err)
 		os.Exit(1)
+	}
+
+	if ctx.flag.norun || ctx.flag.cleanOnly {
+		os.Exit(0)
 	}
 
 	// Run
@@ -531,9 +635,9 @@ func main() {
 	if targetName[0] != '.' {
 		cmd[0] = "./"+targetName
 	}
-	cmd = append(cmd, args[1:]...)
+	cmd = append(cmd, os.Args[ctx.nArg:]...)
 
-	//fmt.Println(strings.Join(args, " "))
+	fmt.Println(strings.Join(cmd, " "))
 	p, error := os.StartProcess(cmd[0], cmd,
 		&os.ProcAttr{".", os.Environ(), []*os.File{os.Stdin, os.Stdout, os.Stderr}})
 
