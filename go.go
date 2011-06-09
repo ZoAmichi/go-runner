@@ -140,21 +140,18 @@ func (self *target) reflesh() os.Error {
 	dir, packageName := path.Split(self.importName)
 	dir = path.Clean(dir)
 	if !self.ensureSources {
-		for _, v := range self.ctx.listDir(dir) {
-			s := path.Join(dir, v)
+		for _, v := range self.ctx.listDir(path.Join(self.ctx.basedir, dir)) {
+			s := path.Join(self.ctx.basedir, dir, v)
 			if path.Ext(s) != ".go" || strings.HasSuffix(s, "_test.go") {
 				continue
 			}
-			if _, exist := self.files[s]; !exist {
-				src, err := self.ctx.getSource(s)
-				if err != nil {
-					return err
-				}
-				if src != nil {
-					if src.packageName == packageName {
-						self.files[src.filepath] = src
-					}
-				}
+			if _, exist := self.files[s]; exist {
+				continue
+			}
+			if src, err := self.ctx.getSource(s); err != nil {
+				return err
+			} else if src != nil && src.packageName == packageName {
+				self.files[src.filepath] = src
 			}
 		}
 	}
@@ -163,7 +160,7 @@ func (self *target) reflesh() os.Error {
 		return os.ErrorString(fmt.Sprintf("collect source of %s.", self.importName))
 	}
 
-	self.objectDir = dir
+	self.objectDir = path.Join(self.ctx.basedir, dir)
 	obj := path.Join(self.objectDir, self.targetName+"."+arch)
 
 	// clean
@@ -177,6 +174,9 @@ func (self *target) reflesh() os.Error {
 		}
 		for _, t := range targets {
 			if err := os.Remove(t); err != nil {
+				if patherr, ok := err.(*os.PathError); ok {
+					if patherr.Error == os.ENOENT {continue}
+				}
 				// warn
 				fmt.Fprintf(os.Stderr, "Can't %v\n", err)
 			}
@@ -262,6 +262,7 @@ func (self *target) build() ( bool, os.Error ) {
 	if len(includeArgs) > 0 {
 		i = 0
 		for _, pkgPath := range self.packagePaths {
+			pkgPath = path.Join(self.ctx.basedir, pkgPath)
 			includeArgs[i] = "-I"
 			includeArgs[i+1] = pkgPath
 			linkArgs[i] = "-L"
@@ -331,6 +332,7 @@ type flag struct {
 type context struct {
 	flag        *flag
 	nArg        int
+	basedir     string
 	gofile      string
 	files       map[string]*source
 	ignoreFiles map[string]string
@@ -375,7 +377,8 @@ func newContext() (*context, os.Error) {
 
 		} else {
 			// source
-			c.gofile = arg
+			c.basedir, c.gofile = path.Split(arg)
+			c.basedir = path.Clean(c.basedir)
 			break
 		}
 
@@ -385,8 +388,8 @@ func newContext() (*context, os.Error) {
 }
 
 func (self *context) getRunnableSource(filename string) (*source, os.Error) {
-
-	temp := filename
+	
+	filename = path.Join(self.basedir, filename)
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -450,22 +453,22 @@ func (self *context) getRunnableSource(filename string) (*source, os.Error) {
 	}
 
 	// write go source to temporary file.
-	temp = filename + ".tmp"
-	for i:=1 ;self.fileExists(temp); i++ {
-		temp = fmt.Sprintf("%s.%d", filename, i)
+	tempPath := filename+".tmp"
+	for i:=1 ;self.fileExists(tempPath); i++ {
+		tempPath = fmt.Sprintf("%s.%d", filename, i)
 	}
 	err = func() os.Error {
-		tempFile, e := os.OpenFile(temp, os.O_WRONLY|os.O_CREATE, 0644)
+		f, e := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE, 0644)
 		if e != nil {
 			return e
 		}
 		defer func(){
-			tempFile.Close()
+			f.Close()
 			name := path.Clean(filename)
 			self.ignoreFiles[name] = name
 		}()
 
-		w := bufio.NewWriter(tempFile)
+		w := bufio.NewWriter(f)
 		for {
 			if c, e = r.ReadByte(); e == os.EOF {
 				break
@@ -483,7 +486,7 @@ func (self *context) getRunnableSource(filename string) (*source, os.Error) {
 		return nil, err
 	}
 
-	src, err := self.getSource(temp)
+	src, err := self.getSource(tempPath)
 	if err != nil {
 		return nil, err
 	}
@@ -519,7 +522,7 @@ func (self *context) getSource(filepath string) (*source, os.Error) {
 	return src, nil
 }
 
-func (*context) fileExists(filename string) bool {
+func (self *context) fileExists(filename string) bool {
 
 	file, err := os.Open(filename)
 	defer file.Close()
@@ -535,7 +538,7 @@ func (*context) fileExists(filename string) bool {
 	return true
 }
 
-func (*context) listDir(dirname string) []string {
+func (self *context) listDir(dirname string) []string {
 	if file, err := os.Open(dirname); err == nil {
 		defer file.Close()
 		if fi, err := file.Readdir(-1); err == nil {
@@ -631,10 +634,7 @@ func main() {
 
 	// Run
 	cmd := make([]string, 1)
-	cmd[0] = targetName
-	if targetName[0] != '.' {
-		cmd[0] = "./"+targetName
-	}
+	cmd[0] = path.Join(ctx.basedir, targetName)
 	cmd = append(cmd, os.Args[ctx.nArg:]...)
 
 	fmt.Println(strings.Join(cmd, " "))
