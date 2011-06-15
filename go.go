@@ -7,12 +7,14 @@ package main
 
 import (
 	"os"
+	"io"
 	"fmt"
 	"container/list"
 	"go/parser"
 	"go/ast"
 	"go/token"
 	"bufio"
+	"crypto/md5"
 	"runtime"
 	"strconv"
 	"strings"
@@ -24,7 +26,8 @@ var (
 	gobin     = os.Getenv("GOBIN")
 	gopkg     = ""
 	arch      = ""
-	usage     = "go [-dcrCRNuEvV] [go-file] [args]"
+	gdb       = ""
+	usage     = "go [-cdrCRNuEvV] [go-file] [args]"
 )
 
 func init() {
@@ -42,6 +45,10 @@ func init() {
 		arch = v
 	} else {
 		arch = ""
+	}
+	gdb = os.Getenv("GOGDB")
+	if gdb == "" {
+		gdb = "gdb"
 	}
 }
 
@@ -101,8 +108,7 @@ type target struct {
 	importName     string
 	objectDir      string
 	files          map[string]*source
-	imports        *list.List // List<*Target>
-	packagePaths   map[string]string
+	imports        *list.List // List<*target>
 	shouldUpdate   bool
 	ensureSources  bool
 	isLocalPackage bool
@@ -116,7 +122,6 @@ func newTarget(ctx *context, targetName string, importName string) *target {
 	t.objectDir = ""
 	t.files = make(map[string]*source)
 	t.imports = list.New()
-	t.packagePaths = make(map[string]string)
 	t.shouldUpdate = false
 	t.ensureSources = false
 	t.isLocalPackage = true
@@ -124,6 +129,7 @@ func newTarget(ctx *context, targetName string, importName string) *target {
 }
 
 func (self *target) reflesh() os.Error {
+	//fmt.Println("reflesth: "+self.targetName)
 	// installed package
 	if self.importName != "main" {
 		obj := path.Join(gopkg, self.importName) + ".a"
@@ -140,8 +146,9 @@ func (self *target) reflesh() os.Error {
 	dir, packageName := path.Split(self.importName)
 	dir = path.Clean(dir)
 	if !self.ensureSources {
-		for _, v := range self.ctx.listDir(path.Join(self.ctx.basedir, dir)) {
-			s := path.Join(self.ctx.basedir, dir, v)
+		for _, f := range self.ctx.listFiles(path.Join(self.ctx.baseDir, dir)) {
+			if f.IsDirectory() {continue}
+			s := path.Join(self.ctx.baseDir, dir, f.Name)
 			if path.Ext(s) != ".go" || strings.HasSuffix(s, "_test.go") {
 				continue
 			}
@@ -160,11 +167,38 @@ func (self *target) reflesh() os.Error {
 		return os.ErrorString(fmt.Sprintf("collect source of %s.", self.importName))
 	}
 
-	self.objectDir = path.Join(self.ctx.basedir, dir)
+	flag := self.ctx.flag
+	if self.ctx.cacheDir != "" {
+
+		if strings.HasPrefix(self.ctx.cacheDir, "./") {
+			self.objectDir = path.Join(self.ctx.baseDir, dir)
+			self.objectDir = path.Join(self.objectDir, self.ctx.cacheDir[2:], dir)
+		} else {
+			hash := md5.New()
+			hash.Write( []byte( path.Join(self.ctx.baseDir, dir) ) )
+			self.objectDir = path.Join( self.ctx.cacheDir, fmt.Sprintf( "%x", hash.Sum() ) )
+			// TODO duplicate directory
+		}
+
+		if flag.debug {
+			self.objectDir = path.Join( self.objectDir, "debug" )
+		} else {
+			self.objectDir = path.Join( self.objectDir, "release" )
+		}
+
+	} else {
+		self.objectDir = path.Join(self.ctx.baseDir, dir)
+	}
+
+	
 	obj := path.Join(self.objectDir, self.targetName+"."+arch)
 
-	// clean
-	if self.ctx.flag.cleanOnly || self.ctx.flag.rebuild {
+	if !self.ctx.fileExists(self.objectDir) {
+		if !flag.cleanOnly {
+			if err := os.MkdirAll(self.objectDir, 0755); err != nil { return err }
+		}
+	}else if flag.cleanOnly || flag.rebuild {
+		// clean
 		targets := make([]string, 2)
 		targets[0] = obj
 		if self.importName == "main" {
@@ -220,7 +254,6 @@ func (self *target) reflesh() os.Error {
 			}
 			if imp.isLocalPackage {
 				self.imports.PushBack(imp)
-				self.packagePaths["."]="."
 			}
 		}
 	}
@@ -257,16 +290,16 @@ func (self *target) build() ( bool, os.Error ) {
 		argv = append( argv, "-u")
 	}
 	argv = append( argv, []string{ "-o", path.Join(self.objectDir, self.targetName+"."+arch) }... )
-	includeArgs := make([]string, len(self.packagePaths)*2)
+	includeArgs := make([]string, self.imports.Len()*2)
 	linkArgs := make([]string, len(includeArgs))
 	if len(includeArgs) > 0 {
 		i = 0
-		for _, pkgPath := range self.packagePaths {
-			pkgPath = path.Join(self.ctx.basedir, pkgPath)
+		for e:=self.imports.Front(); e!=nil; e=e.Next() {
+			t := e.Value.(*target)
 			includeArgs[i] = "-I"
-			includeArgs[i+1] = pkgPath
+			includeArgs[i+1] = t.objectDir
 			linkArgs[i] = "-L"
-			linkArgs[i+1] = pkgPath
+			linkArgs[i+1] = t.objectDir
 			i+=2
 		}
 		argv = append(argv, includeArgs...)
@@ -314,6 +347,93 @@ func (self *target) build() ( bool, os.Error ) {
 	return true, nil
 }
 
+func run(t *target) (int, os.Error) {
+	cmd := make([]string, 1)
+	cmd[0] = path.Join(t.objectDir, t.targetName)
+	cmd = append(cmd, os.Args[t.ctx.nArg:]...)
+
+	//fmt.Println(strings.Join(cmd, " "))
+	p, err := os.StartProcess(cmd[0], cmd,
+		&os.ProcAttr{".", os.Environ(), []*os.File{os.Stdin, os.Stdout, os.Stderr}})
+
+	if err != nil {
+		return 1, err
+	}
+
+	if m, err := p.Wait(0); err != nil {
+		return 1, err
+	} else if m.WaitStatus != 0 {
+		return int(m.WaitStatus), nil
+	}
+	
+	return 0, nil
+}
+
+func runDebugger(t *target) (int, os.Error) {
+	cmd := make([]string, 2)
+	if c, exist := t.ctx.whereIs(gdb); !exist {
+		return 1, os.ErrorString("find gdb.")
+	} else {
+		cmd[0] = c
+	}
+	cmd[1] = path.Join(t.objectDir, t.targetName)
+
+	stdInReader,stdInWriter,err := os.Pipe()
+	if err != nil {
+		return 1,err
+	}
+
+	stdOutReader,stdOutWriter,err := os.Pipe()
+	if err != nil {
+		return 1,err
+	}
+
+	fmt.Println(strings.Join(cmd, " "))
+	p, err := os.StartProcess(cmd[0], cmd,
+		&os.ProcAttr{".", os.Environ(), []*os.File{stdInReader, stdOutWriter, os.Stderr}})
+	if err != nil {
+		return 1, err
+	}
+
+	// Wait for gdb prompt.
+	buf := make([]byte, 1)
+	line := ""
+	for {
+		if _,err = stdOutReader.Read(buf); err == os.EOF {
+			break
+		} else if err != nil {
+			return 1, err
+		}
+		if buf[0] == 0x0A {
+			fmt.Println(line)
+			line = ""
+			continue
+		} else {
+			line += string(buf)
+		}
+		if line == "(gdb) " {
+			break
+		}
+	}
+	go func(){ io.Copy(os.Stdout, stdOutReader) }()
+
+	in := "set args " + strings.Join(os.Args[t.ctx.nArg:], " ") + "\n"
+	if _,err := stdInWriter.WriteString(in); err!=nil {
+		return 1,err
+	}
+
+	// TODO Ctrl+D support and other...
+	go func(){ io.Copy(stdInWriter, os.Stdin) }()
+
+	if m, err := p.Wait(0); err != nil {
+		return 1, err
+	} else if m.WaitStatus != 0 {
+		return int(m.WaitStatus), nil
+	}
+
+	return 0, nil
+}
+
 // flag
 type flag struct {
 	debug bool
@@ -332,8 +452,10 @@ type flag struct {
 type context struct {
 	flag        *flag
 	nArg        int
-	basedir     string
+	baseDir     string
+	cacheDir    string
 	gofile      string
+	path        []string
 	files       map[string]*source
 	ignoreFiles map[string]string
 }
@@ -344,15 +466,16 @@ func newContext() (*context, os.Error) {
 	c.files = make(map[string]*source)
 	c.ignoreFiles = make(map[string]string)
 	c.gofile = ""
+	c.path = strings.Split(os.Getenv("PATH"), ":", -1)
 	c.nArg = 1
 
 	flagMap := map[int]*bool {
-		'd':&c.flag.debug,
 		'c':&c.flag.encache,
+		'd':&c.flag.debug,
 		'r':&c.flag.rebuild,
 		'C':&c.flag.cleanOnly,
-		'R':&c.flag.norun,
 		'N':&c.flag.disableOptimiz,
+		'R':&c.flag.norun,
 		'u':&c.flag.disallowUnsafe,
 		'E':&c.flag.extraSymbol,
 		'v':&c.flag.verbose,
@@ -377,11 +500,27 @@ func newContext() (*context, os.Error) {
 
 		} else {
 			// source
-			c.basedir, c.gofile = path.Split(arg)
-			c.basedir = path.Clean(c.basedir)
+			c.baseDir, c.gofile = path.Split(arg)
+			c.baseDir = path.Clean(c.baseDir)
 			break
 		}
 
+	}
+
+	// cache directory
+	c.cacheDir = os.Getenv("GOCACHE")
+	if c.cacheDir == "" && c.flag.encache {
+		c.cacheDir = "."
+	}
+
+	if c.cacheDir == "." {
+		c.cacheDir = "./.go"
+	} else if c.cacheDir != "" {
+		c.cacheDir = path.Clean(c.cacheDir)
+		if c.cacheDir[0] == '~' {
+			c.cacheDir = path.Join(os.Getenv("HOME"), c.cacheDir[1:])
+		}
+		// TODO check
 	}
 
 	return c, nil
@@ -389,7 +528,7 @@ func newContext() (*context, os.Error) {
 
 func (self *context) getRunnableSource(filename string) (*source, os.Error) {
 	
-	filename = path.Join(self.basedir, filename)
+	filename = path.Join(self.baseDir, filename)
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -505,7 +644,7 @@ func (self *context) getSource(filepath string) (*source, os.Error) {
 	// TODO clean path
 	filepath = path.Clean(filepath)
 
-	// TODO to listDir
+	// TODO to listFiles
 	if _, exist := self.ignoreFiles[filepath]; exist {
 		return nil, nil
 	}
@@ -520,6 +659,21 @@ func (self *context) getSource(filepath string) (*source, os.Error) {
 	}
 
 	return src, nil
+}
+
+func (self *context) whereIs(name string) (cmd string, exist bool) {
+	// TODO ./
+	// TODO ~/
+	for _,dir := range self.path {
+		cmd = path.Join(dir, name)
+		if self.fileExists(cmd) {
+			exist = true
+			return
+		}
+	}
+	cmd = ""
+	exist = false
+	return
 }
 
 func (self *context) fileExists(filename string) bool {
@@ -538,28 +692,19 @@ func (self *context) fileExists(filename string) bool {
 	return true
 }
 
-func (self *context) listDir(dirname string) []string {
+func (self *context) listFiles(dirname string) []os.FileInfo {
 	if file, err := os.Open(dirname); err == nil {
 		defer file.Close()
 		if fi, err := file.Readdir(-1); err == nil {
-			//list := make( []string, 0 )
-			//for i:=0; i<len(fi); i++ {
-			//	list = append( list, fi[i].Name() )
-			//}
-			list := make([]string, len(fi))
-			for i := 0; i < len(fi); i++ {
-				_, filename := path.Split(fi[i].Name)
-				list[i] = filename
-			}
-			return list
+			return fi
 		}
 	}
-	return make([]string, 0)
+	return make([]os.FileInfo, 0)
 }
 
 func (*context) exec(args []string, dir string) os.Error {
 
-	fmt.Println(strings.Join(args, " "))
+	//fmt.Println(strings.Join(args, " "))
 	p, error := os.StartProcess(args[0], args,
 		&os.ProcAttr{dir, os.Environ(), []*os.File{nil, os.Stdout, os.Stderr}})
 
@@ -597,7 +742,8 @@ func main() {
 	}
 
 	// Build
-	build := func() ( bool, os.Error ) {
+	var t *target
+	builder := func() ( bool, os.Error ) {
 		src, err := ctx.getRunnableSource(ctx.gofile)
 		if err != nil { return false, err }
 
@@ -611,7 +757,7 @@ func main() {
 			}()
 		}
 
-		t := newTarget(ctx, targetName, src.packageName)
+		t = newTarget(ctx, targetName, src.packageName)
 		t.files[src.filepath] = src
 		t.ensureSources = true
 		if err = t.reflesh(); err != nil { return false, err }
@@ -623,7 +769,7 @@ func main() {
 		return false, nil
 	}
 	
-	if _, err := build(); err != nil {
+	if _, err := builder(); err != nil {
 		fmt.Fprintf(os.Stderr, "Can't %s\n", err)
 		os.Exit(1)
 	}
@@ -632,25 +778,16 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Run
-	cmd := make([]string, 1)
-	cmd[0] = path.Join(ctx.basedir, targetName)
-	cmd = append(cmd, os.Args[ctx.nArg:]...)
-
-	fmt.Println(strings.Join(cmd, " "))
-	p, error := os.StartProcess(cmd[0], cmd,
-		&os.ProcAttr{".", os.Environ(), []*os.File{os.Stdin, os.Stdout, os.Stderr}})
-
-	if error != nil {
-		fmt.Fprintf(os.Stderr, "Can't %s\n", error)
-		os.Exit(1)
+	var runner func(*target) (int, os.Error)
+	if ctx.flag.debug {
+		runner = runDebugger
+	} else {
+		runner = run
 	}
 
-	if m, error := p.Wait(0); error != nil {
-		fmt.Fprintf(os.Stderr, "Can't %s\n", error)
-		os.Exit(1)
-	} else if m.WaitStatus != 0 {
-		os.Exit(int(m.WaitStatus))
+	status, err := runner(t)
+	if err!=nil {
+		fmt.Fprintf(os.Stderr, "Can't %s\n", err)
 	}
-
+	os.Exit(status)
 }
