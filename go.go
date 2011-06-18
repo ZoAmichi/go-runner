@@ -7,7 +7,6 @@ package main
 
 import (
 	"os"
-	"io"
 	"fmt"
 	"container/list"
 	"go/parser"
@@ -370,60 +369,22 @@ func run(t *target) (int, os.Error) {
 }
 
 func runDebugger(t *target) (int, os.Error) {
-	cmd := make([]string, 2)
+	cmd := make([]string, 3)
 	if c, exist := t.ctx.whereIs(gdb); !exist {
 		return 1, os.ErrorString("find gdb.")
 	} else {
 		cmd[0] = c
 	}
-	cmd[1] = path.Join(t.objectDir, t.targetName)
+	cmd[1] = "--args"
+	cmd[2] = path.Join(t.objectDir, t.targetName)
+	cmd = append(cmd, os.Args[t.ctx.nArg:]...)
 
-	stdInReader,stdInWriter,err := os.Pipe()
-	if err != nil {
-		return 1,err
-	}
-
-	stdOutReader,stdOutWriter,err := os.Pipe()
-	if err != nil {
-		return 1,err
-	}
-
-	fmt.Println(strings.Join(cmd, " "))
+	//fmt.Println(strings.Join(cmd," "))
 	p, err := os.StartProcess(cmd[0], cmd,
-		&os.ProcAttr{".", os.Environ(), []*os.File{stdInReader, stdOutWriter, os.Stderr}})
+		&os.ProcAttr{".", os.Environ(), []*os.File{os.Stdin, os.Stdout, os.Stderr}})
 	if err != nil {
 		return 1, err
 	}
-
-	// Wait for gdb prompt.
-	buf := make([]byte, 1)
-	line := ""
-	for {
-		if _,err = stdOutReader.Read(buf); err == os.EOF {
-			break
-		} else if err != nil {
-			return 1, err
-		}
-		if buf[0] == 0x0A {
-			fmt.Println(line)
-			line = ""
-			continue
-		} else {
-			line += string(buf)
-		}
-		if line == "(gdb) " {
-			break
-		}
-	}
-	go func(){ io.Copy(os.Stdout, stdOutReader) }()
-
-	in := "set args " + strings.Join(os.Args[t.ctx.nArg:], " ") + "\n"
-	if _,err := stdInWriter.WriteString(in); err!=nil {
-		return 1,err
-	}
-
-	// TODO Ctrl+D support and other...
-	go func(){ io.Copy(stdInWriter, os.Stdin) }()
 
 	if m, err := p.Wait(0); err != nil {
 		return 1, err
