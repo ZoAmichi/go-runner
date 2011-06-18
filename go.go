@@ -7,6 +7,8 @@ package main
 
 import (
 	"os"
+	"os/signal"
+	"syscall"
 	"fmt"
 	"container/list"
 	"go/parser"
@@ -23,6 +25,7 @@ import (
 var (
 	curdir, _ = os.Getwd()
 	gobin     = os.Getenv("GOBIN")
+	goos      = ""
 	gopkg     = ""
 	arch      = ""
 	gdb       = ""
@@ -30,7 +33,7 @@ var (
 )
 
 func init() {
-	goos := os.Getenv("GOOS")
+	goos = os.Getenv("GOOS")
 	if goos == "" {
 		goos = runtime.GOOS
 	}
@@ -346,50 +349,43 @@ func (self *target) build() ( bool, os.Error ) {
 	return true, nil
 }
 
-func run(t *target) (int, os.Error) {
-	cmd := make([]string, 1)
-	cmd[0] = path.Join(t.objectDir, t.targetName)
-	cmd = append(cmd, os.Args[t.ctx.nArg:]...)
+func (self *target)run() (int, os.Error) {
 
-	//fmt.Println(strings.Join(cmd, " "))
-	p, err := os.StartProcess(cmd[0], cmd,
-		&os.ProcAttr{".", os.Environ(), []*os.File{os.Stdin, os.Stdout, os.Stderr}})
-
-	if err != nil {
-		return 1, err
-	}
-
-	if m, err := p.Wait(0); err != nil {
-		return 1, err
-	} else if m.WaitStatus != 0 {
-		return int(m.WaitStatus), nil
-	}
-	
-	return 0, nil
-}
-
-func runDebugger(t *target) (int, os.Error) {
-	cmd := make([]string, 3)
-	if c, exist := t.ctx.whereIs(gdb); !exist {
-		return 1, os.ErrorString("find gdb.")
+	var cmd []string
+	if !self.ctx.flag.debug {
+		cmd = make([]string, 1)
+		cmd[0] = path.Join(self.objectDir, self.targetName)
+		cmd = append(cmd, os.Args[self.ctx.nArg:]...)
 	} else {
-		cmd[0] = c
+		cmd = make([]string, 3)
+		if c, exist := self.ctx.whereIs(gdb); !exist {
+			return 1, os.ErrorString("find gdb.")
+		} else {
+			cmd[0] = c
+		}
+		cmd[1] = "--args"
+		cmd[2] = path.Join(self.objectDir, self.targetName)
+		cmd = append(cmd, os.Args[self.ctx.nArg:]...)
 	}
-	cmd[1] = "--args"
-	cmd[2] = path.Join(t.objectDir, t.targetName)
-	cmd = append(cmd, os.Args[t.ctx.nArg:]...)
 
 	//fmt.Println(strings.Join(cmd," "))
-	p, err := os.StartProcess(cmd[0], cmd,
+	proc, err := os.StartProcess(cmd[0], cmd,
 		&os.ProcAttr{".", os.Environ(), []*os.File{os.Stdin, os.Stdout, os.Stderr}})
 	if err != nil {
 		return 1, err
 	}
 
-	if m, err := p.Wait(0); err != nil {
+	// incomplete: pass signal to command.(unix)
+	go func() { for sig := range signal.Incoming {
+		if v,ok := sig.(signal.UnixSignal); ok {
+			syscall.Kill(proc.Pid, int(v))
+		}
+	}}()
+
+	if msg, err := proc.Wait(0); err != nil {
 		return 1, err
-	} else if m.WaitStatus != 0 {
-		return int(m.WaitStatus), nil
+	} else if msg.WaitStatus != 0 {
+		return int(msg.WaitStatus), nil
 	}
 
 	return 0, nil
@@ -739,14 +735,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	var runner func(*target) (int, os.Error)
-	if ctx.flag.debug {
-		runner = runDebugger
-	} else {
-		runner = run
-	}
-
-	status, err := runner(t)
+	status, err := t.run()
 	if err!=nil {
 		fmt.Fprintf(os.Stderr, "Can't %s\n", err)
 	}
