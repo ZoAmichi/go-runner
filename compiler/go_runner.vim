@@ -15,7 +15,7 @@ if exists(":CompilerSet") != 2  " older Vim always used :setlocal
   command -nargs=* CompilerSet setlocal <args>
 endif
 
-CompilerSet makeprg=go\ -R\ %
+CompilerSet makeprg=go\ -Rq\ %
 CompilerSet errorformat=%f:%l:%m
 
 let &cpo = s:savecpo

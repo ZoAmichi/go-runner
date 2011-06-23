@@ -211,7 +211,9 @@ func (self *target) reflesh() os.Error {
 					if patherr.Error == os.ENOENT {continue}
 				}
 				// warn
-				fmt.Fprintf(os.Stderr, "Can't %v\n", err)
+				if !self.ctx.flag.quiet {
+					fmt.Fprintf(os.Stderr, "Can't %v\n", err)
+				}
 			}
 		}
 	}
@@ -398,6 +400,7 @@ type flag struct {
 	disableOptimiz bool
 	disallowUnsafe bool
 	extraSymbol bool
+	quiet bool
 	verbose bool
 	version bool
 }
@@ -432,6 +435,7 @@ func newContext() (*context, os.Error) {
 		'R':&c.flag.norun,
 		'u':&c.flag.disallowUnsafe,
 		'E':&c.flag.extraSymbol,
+		'q':&c.flag.quiet,
 		'v':&c.flag.verbose,
 		'V':&c.flag.version,
 	}
@@ -676,7 +680,7 @@ func (*context) exec(args []string, dir string) os.Error {
 }
 
 func (self *context) exit(status int, err os.Error) {
-	if err != nil {
+	if err != nil && !self.flag.quiet {
 		fmt.Fprintf(os.Stderr, "Can't %v\n", err)
 	}
 	os.Exit(status)
@@ -687,13 +691,17 @@ func main() {
 	ctx, err := newContext()
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		fmt.Println(usage)
+		if !ctx.flag.quiet {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			fmt.Println(usage)
+		}
 		ctx.exit(1, nil)
 	}
 
 	if ctx.gofile == "" {
-		fmt.Println(usage)
+		if !ctx.flag.quiet {
+			fmt.Println(usage)
+		}
 		ctx.exit(1, nil)
 	}
 
@@ -713,7 +721,9 @@ func main() {
 			defer func(){
 				if err = os.Remove(src.filepath); err != nil {
 					// warn
-					fmt.Fprintf(os.Stderr, "Can't %v\n", err)
+					if !ctx.flag.quiet {
+						fmt.Fprintf(os.Stderr, "Can't %v\n", err)
+					}
 				}
 			}()
 		}

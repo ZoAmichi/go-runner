@@ -13,7 +13,7 @@ function! GoMake()
   endif
 
   redraw!
-  echo "!go -R " . bufname('%')
+  echo "!go -Rq " . bufname('%')
   for err in s:qflist
     echo bufname(err.bufnr) .':'. err.lnum .':'. err.text
   endfor
