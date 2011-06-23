@@ -25,6 +25,7 @@ import (
 var (
 	curdir, _ = os.Getwd()
 	gobin     = os.Getenv("GOBIN")
+	goarch    = ""
 	goos      = ""
 	gopkg     = ""
 	arch      = ""
@@ -33,12 +34,10 @@ var (
 )
 
 func init() {
-	goos = os.Getenv("GOOS")
-	if goos == "" {
+	if goos = os.Getenv("GOOS"); goos == "" {
 		goos = runtime.GOOS
 	}
-	goarch := os.Getenv("GOARCH")
-	if goarch == "" {
+	if goarch = os.Getenv("GOARCH"); goarch == "" {
 		goarch = runtime.GOARCH
 	}
 	gopkg = path.Join(runtime.GOROOT(), "pkg", goos+"_"+goarch)
@@ -48,12 +47,10 @@ func init() {
 	} else {
 		arch = ""
 	}
-	gdb = os.Getenv("GOGDB")
-	if gdb == "" {
+	if gdb = os.Getenv("GOGDB"); gdb == "" {
 		gdb = "gdb"
 	}
 }
-
 
 // source
 type source struct {
@@ -465,7 +462,7 @@ func newContext() (*context, os.Error) {
 	}
 
 	// cache directory
-	c.cacheDir = os.Getenv("GOCACHE")
+	c.cacheDir = os.Getenv("GOCACHEDIR")
 	if c.cacheDir == "" && c.flag.encache {
 		c.cacheDir = "."
 	}
@@ -678,6 +675,13 @@ func (*context) exec(args []string, dir string) os.Error {
 	return nil
 }
 
+func (self *context) exit(status int, err os.Error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Can't %v\n", err)
+	}
+	os.Exit(status)
+}
+
 func main() {
 
 	ctx, err := newContext()
@@ -685,12 +689,12 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		fmt.Println(usage)
-		os.Exit(1)
+		ctx.exit(1, nil)
 	}
 
 	if ctx.gofile == "" {
 		fmt.Println(usage)
-		os.Exit(1)
+		ctx.exit(1, nil)
 	}
 
 	targetName := ctx.gofile
@@ -725,19 +729,14 @@ func main() {
 
 		return false, nil
 	}
-	
+
 	if _, err := builder(); err != nil {
-		fmt.Fprintf(os.Stderr, "Can't %s\n", err)
-		os.Exit(1)
+		ctx.exit(1, err)
 	}
 
 	if ctx.flag.norun || ctx.flag.cleanOnly {
-		os.Exit(0)
+		ctx.exit(0, nil)
 	}
 
-	status, err := t.run()
-	if err!=nil {
-		fmt.Fprintf(os.Stderr, "Can't %s\n", err)
-	}
-	os.Exit(status)
+	ctx.exit(t.run()...)
 }
