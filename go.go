@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"path"
+	"json"
 )
 
 var (
@@ -100,6 +101,12 @@ func newSource(filepath string) (*source, os.Error) {
 	return s, nil
 }
 
+// Profile
+type Profile struct {
+	Target string
+	GoFiles []string
+}
+
 // target
 type target struct {
 	ctx            *context
@@ -109,7 +116,6 @@ type target struct {
 	files          map[string]*source
 	imports        *list.List // List<*target>
 	shouldUpdate   bool
-	ensureSources  bool
 	isLocalPackage bool
 }
 
@@ -122,9 +128,35 @@ func newTarget(ctx *context, targetName string, importName string) *target {
 	t.files = make(map[string]*source)
 	t.imports = list.New()
 	t.shouldUpdate = false
-	t.ensureSources = false
 	t.isLocalPackage = true
 	return t
+}
+
+func (self *target) loadProfile( packageName string ) os.Error {
+	file, err := os.Open(packageName + ".gofiles")
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	var prof Profile
+	if err := json.NewDecoder(file).Decode(&prof); err != nil {
+		return err
+	}
+	if packageName != "main" {
+		self.targetName = prof.Target
+	}
+	for _, entry := range prof.GoFiles {
+		// TODO parse wildcard and ~
+		if _, exist := self.files[entry]; exist {
+			continue
+		}
+		if src, err := self.ctx.getSource(entry); err != nil {
+			return err
+		} else if src != nil && src.packageName == packageName {
+			self.files[src.filepath] = src
+		}
+	}
+	return nil
 }
 
 func (self *target) reflesh() os.Error {
@@ -144,7 +176,10 @@ func (self *target) reflesh() os.Error {
 	// find local package sources
 	dir, packageName := path.Split(self.importName)
 	dir = path.Clean(dir)
-	if !self.ensureSources {
+	if self.ctx.fileExists(packageName+".gofiles") {
+		if err := self.loadProfile(packageName); err != nil { return err }
+
+	} else if packageName != "main" {
 		for _, f := range self.ctx.listFiles(path.Join(self.ctx.baseDir, dir)) {
 			if f.IsDirectory() {continue}
 			s := path.Join(self.ctx.baseDir, dir, f.Name)
@@ -730,7 +765,6 @@ func main() {
 
 		t = newTarget(ctx, targetName, src.packageName)
 		t.files[src.filepath] = src
-		t.ensureSources = true
 		if err = t.reflesh(); err != nil { return false, err }
 
 		if !ctx.flag.cleanOnly {
